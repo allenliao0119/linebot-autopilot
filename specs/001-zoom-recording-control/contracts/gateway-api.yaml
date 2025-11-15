@@ -1,0 +1,238 @@
+openapi: 3.0.3
+info:
+  title: LINE Bot Gateway Service API
+  description: |
+    Gateway Service 負責接收 LINE Bot webhook 請求，驗證使用者身份，並轉發指令至 Mac Control Service。
+
+    **安全機制**:
+    - LINE webhook 簽章驗證（HMAC-SHA256）
+    - 使用者白名單檢查
+    - Tailscale VPN 加密通訊
+
+    **部署環境**: AWS EC2 (Ubuntu 22.04, Tailscale IP: 100.64.x.1)
+  version: 1.0.0
+  contact:
+    name: Development Team
+servers:
+  - url: https://your-domain.com
+    description: 生產環境 (AWS EC2 Elastic IP)
+  - url: http://localhost:8080
+    description: 本地開發環境
+
+security:
+  - LineSignature: []
+
+paths:
+  /webhook:
+    post:
+      summary: LINE Bot Webhook 端點
+      description: |
+        接收 LINE Messaging API 推送的 webhook 事件，處理使用者訊息與操作。
+
+        **流程**:
+        1. 驗證 LINE webhook 簽章
+        2. 檢查使用者是否在授權白名單中
+        3. 解析使用者意圖（加入會議、開始錄製等）
+        4. 轉發指令至 Mac Control Service
+        5. 回傳執行結果給 LINE Bot
+      operationId: handleWebhook
+      tags:
+        - Webhook
+      security:
+        - LineSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LineWebhookRequest'
+            example:
+              destination: "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              events:
+                - type: "message"
+                  message:
+                    type: "text"
+                    id: "12345678"
+                    text: "加入會議"
+                  timestamp: 1638374400000
+                  source:
+                    type: "user"
+                    userId: "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                  replyToken: "b60d432864f44d07aa8f38f48aba3a23"
+      responses:
+        '200':
+          description: Webhook 處理成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+        '400':
+          description: 請求格式錯誤
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 簽章驗證失敗或使用者未授權
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 伺服器內部錯誤
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /health:
+    get:
+      summary: 健康檢查端點
+      description: 用於檢查 Gateway Service 是否正常運行
+      operationId: healthCheck
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: 服務正常
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "healthy"
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2025-11-15T14:30:22+08:00"
+                  version:
+                    type: string
+                    example: "1.0.0"
+
+components:
+  securitySchemes:
+    LineSignature:
+      type: apiKey
+      in: header
+      name: X-Line-Signature
+      description: LINE webhook 簽章（HMAC-SHA256）
+
+  schemas:
+    LineWebhookRequest:
+      type: object
+      required:
+        - destination
+        - events
+      properties:
+        destination:
+          type: string
+          description: Bot 的 User ID
+          example: "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/LineEvent'
+
+    LineEvent:
+      type: object
+      required:
+        - type
+        - timestamp
+        - source
+      properties:
+        type:
+          type: string
+          enum: [message, postback, follow, unfollow, join, leave]
+          description: 事件類型
+        message:
+          $ref: '#/components/schemas/LineMessage'
+        postback:
+          $ref: '#/components/schemas/LinePostback'
+        timestamp:
+          type: integer
+          format: int64
+          description: 事件發生時間（Unix timestamp, milliseconds）
+          example: 1638374400000
+        source:
+          $ref: '#/components/schemas/LineSource'
+        replyToken:
+          type: string
+          description: 用於回覆訊息的 token
+          example: "b60d432864f44d07aa8f38f48aba3a23"
+
+    LineMessage:
+      type: object
+      required:
+        - type
+        - id
+      properties:
+        type:
+          type: string
+          enum: [text, image, video, audio, location, sticker]
+        id:
+          type: string
+          example: "12345678"
+        text:
+          type: string
+          description: 文字訊息內容
+          example: "加入會議"
+
+    LinePostback:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: string
+          description: Postback 資料（Quick Reply 按鈕點擊）
+          example: "action=confirm&session_id=confirm_20251115_143022"
+        params:
+          type: object
+          additionalProperties: true
+
+    LineSource:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [user, group, room]
+        userId:
+          type: string
+          description: LINE 使用者 ID
+          example: "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        groupId:
+          type: string
+        roomId:
+          type: string
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          example: "unauthorized"
+        message:
+          type: string
+          example: "使用者未授權"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-15T14:30:22+08:00"
+
+tags:
+  - name: Webhook
+    description: LINE Bot webhook 處理
+  - name: Health
+    description: 健康檢查

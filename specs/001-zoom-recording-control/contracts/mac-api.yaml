@@ -1,0 +1,497 @@
+openapi: 3.0.3
+info:
+  title: Mac Control Service API
+  description: |
+    Mac Control Service 運行於本地 Mac 電腦，提供 Zoom 會議控制、螢幕錄製與狀態查詢功能。
+
+    **安全機制**:
+    - 僅透過 Tailscale VPN 內網存取（100.64.x.x）
+    - Gateway Service 為唯一授權調用者
+    - Tailscale ACL 限制存取來源
+
+    **部署環境**: macOS 13 Ventura+ (Tailscale IP: 100.64.x.2)
+  version: 1.0.0
+  contact:
+    name: Development Team
+servers:
+  - url: http://100.64.x.2:8080
+    description: Tailscale VPN 內網（生產環境）
+  - url: http://localhost:8080
+    description: 本地開發環境
+
+paths:
+  /zoom/join:
+    post:
+      summary: 加入 Zoom 會議
+      description: |
+        使用 AppleScript 控制 Zoom 應用程式加入指定會議，並切換為全螢幕模式。
+
+        **執行流程**:
+        1. 檢查 Zoom 應用程式是否已安裝
+        2. 啟動 Zoom 應用程式
+        3. 使用 AppleScript 點擊「加入會議」按鈕
+        4. 輸入會議 ID、密碼、顯示名稱
+        5. 加入會議並切換全螢幕
+        6. 儲存會議記錄至 meeting_records 表
+
+        **預期執行時間**: 10-30 秒
+      operationId: joinZoomMeeting
+      tags:
+        - Zoom Control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JoinMeetingRequest'
+      responses:
+        '200':
+          description: 成功加入會議
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZoomJoinResponse'
+        '400':
+          description: 請求參數錯誤（會議 ID 格式不正確）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 加入會議失敗（Zoom 應用程式錯誤、AppleScript 執行失敗）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /zoom/leave:
+    post:
+      summary: 離開 Zoom 會議
+      description: |
+        使用 AppleScript 控制 Zoom 應用程式離開當前會議。
+
+        **執行流程**:
+        1. 檢查當前是否在會議中
+        2. 使用 AppleScript 點擊「離開會議」按鈕
+        3. 確認離開
+
+        **預期執行時間**: 2-5 秒
+      operationId: leaveZoomMeeting
+      tags:
+        - Zoom Control
+      responses:
+        '200':
+          description: 成功離開會議
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BasicResponse'
+        '400':
+          description: 當前未在會議中
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 離開會議失敗（AppleScript 執行失敗）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /recording/start:
+    post:
+      summary: 開始螢幕錄製
+      description: |
+        使用 ffmpeg 開始錄製螢幕與系統音訊（透過 BlackHole）。
+
+        **執行流程**:
+        1. 檢查是否已有正在進行的錄製
+        2. 檢查磁碟空間是否足夠（至少 5GB）
+        3. 檢查 BlackHole 音訊裝置是否存在
+        4. 生成錄製 session_id（格式：rec_YYYYMMDD_HHMMSS）
+        5. 啟動 ffmpeg 背景程序
+        6. 記錄至 recording_sessions 表（status = 'recording'）
+
+        **預期執行時間**: 2-5 秒
+      operationId: startRecording
+      tags:
+        - Screen Recording
+      responses:
+        '200':
+          description: 成功開始錄製
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingStartResponse'
+        '400':
+          description: 已有正在進行的錄製 / 磁碟空間不足
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: ffmpeg 啟動失敗
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /recording/stop:
+    post:
+      summary: 停止螢幕錄製
+      description: |
+        停止當前的 ffmpeg 錄製程序，並回傳錄製檔案資訊。
+
+        **執行流程**:
+        1. 檢查是否有正在進行的錄製
+        2. 發送 SIGINT 訊號至 ffmpeg 程序（優雅停止）
+        3. 等待 ffmpeg 完成檔案寫入（最多 10 秒）
+        4. 計算錄製時長與檔案大小
+        5. 更新 recording_sessions 表（status = 'completed'）
+        6. 回傳錄製檔案資訊
+
+        **預期執行時間**: 5-15 秒
+      operationId: stopRecording
+      tags:
+        - Screen Recording
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StopRecordingRequest'
+      responses:
+        '200':
+          description: 成功停止錄製
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingStopResponse'
+        '400':
+          description: 當前無正在進行的錄製
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: ffmpeg 停止失敗 / 檔案寫入錯誤
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /status:
+    get:
+      summary: 查詢系統狀態
+      description: |
+        回傳當前 Mac 的會議狀態、錄製狀態與時間戳記。
+
+        **查詢內容**:
+        - 會議狀態：是否在會議中、會議 ID
+        - 錄製狀態：是否正在錄製、已錄製時長
+        - 系統時間戳記
+
+        **預期執行時間**: < 1 秒
+      operationId: getStatus
+      tags:
+        - Status
+      responses:
+        '200':
+          description: 成功取得狀態
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemStatus'
+
+  /screenshot:
+    get:
+      summary: 取得螢幕截圖
+      description: |
+        使用 macOS screencapture 工具截圖，回傳 Base64 編碼的 PNG 圖片。
+
+        **執行流程**:
+        1. 使用 `screencapture -x -t png /tmp/screenshot.png` 截圖
+        2. 讀取檔案並轉為 Base64
+        3. 刪除暫存檔案
+        4. 回傳 Base64 字串
+
+        **預期執行時間**: 1-3 秒
+      operationId: getScreenshot
+      tags:
+        - Status
+      responses:
+        '200':
+          description: 成功取得截圖
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScreenshotResponse'
+        '500':
+          description: 截圖失敗
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /health:
+    get:
+      summary: 健康檢查
+      description: |
+        檢查 Mac Control Service 是否正常運行，並回傳系統資訊。
+
+        **檢查項目**:
+        - Zoom 應用程式是否已安裝
+        - ffmpeg 是否已安裝
+        - BlackHole 音訊裝置是否存在
+        - 磁碟可用空間
+
+        **預期執行時間**: < 1 秒
+      operationId: macHealthCheck
+      tags:
+        - Health
+      responses:
+        '200':
+          description: 服務正常
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MacHealthResponse'
+
+components:
+  schemas:
+    JoinMeetingRequest:
+      type: object
+      required:
+        - meeting_id
+        - display_name
+      properties:
+        meeting_id:
+          type: string
+          pattern: '^\d{9,11}$'
+          description: Zoom 會議 ID（9-11 位純數字）
+          example: "1234567890"
+        password:
+          type: string
+          maxLength: 100
+          description: 會議密碼（可選）
+          example: "abc123"
+        display_name:
+          type: string
+          maxLength: 100
+          description: 顯示名稱
+          example: "Allen"
+
+    ZoomJoinResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success]
+          example: "success"
+        message:
+          type: string
+          example: "已成功加入會議 1234567890"
+        meeting_id:
+          type: string
+          example: "1234567890"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-15T14:30:22+08:00"
+
+    StopRecordingRequest:
+      type: object
+      required:
+        - session_id
+      properties:
+        session_id:
+          type: string
+          description: 錄製 session ID
+          example: "rec_20251115_143022"
+
+    RecordingStartResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [recording]
+          example: "recording"
+        session_id:
+          type: string
+          description: 錄製 session ID
+          example: "rec_20251115_143022"
+        message:
+          type: string
+          example: "已開始螢幕錄製"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-15T14:30:22+08:00"
+
+    RecordingStopResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [completed]
+          example: "completed"
+        session_id:
+          type: string
+          example: "rec_20251115_143022"
+        file_path:
+          type: string
+          description: 錄製檔案路徑
+          example: "/Users/mac/recordings/rec_20251115_143022.mp4"
+        file_size:
+          type: integer
+          format: int64
+          description: 檔案大小（bytes）
+          example: 2147483648
+        duration:
+          type: string
+          description: 錄製時長（HH:MM:SS）
+          example: "00:15:32"
+        download_url:
+          type: string
+          format: uri
+          description: 下載連結（若有配置檔案伺服器）
+          example: "https://storage.example.com/rec_20251115_143022.mp4"
+        message:
+          type: string
+          example: "錄製已完成"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-15T14:45:54+08:00"
+
+    SystemStatus:
+      type: object
+      properties:
+        meeting:
+          $ref: '#/components/schemas/MeetingStatus'
+        recording:
+          $ref: '#/components/schemas/RecordingStatus'
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-15T14:30:22+08:00"
+
+    MeetingStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [idle, in_meeting]
+          example: "in_meeting"
+        meeting_id:
+          type: string
+          description: 當前會議 ID（若在會議中）
+          example: "1234567890"
+
+    RecordingStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [idle, recording]
+          example: "recording"
+        session_id:
+          type: string
+          description: 當前錄製 session ID（若正在錄製）
+          example: "rec_20251115_143022"
+        duration:
+          type: string
+          description: 已錄製時長（HH:MM:SS）
+          example: "00:05:23"
+
+    ScreenshotResponse:
+      type: object
+      properties:
+        image_base64:
+          type: string
+          format: byte
+          description: Base64 編碼的 PNG 圖片
+          example: "iVBORw0KGgoAAAANSUhEUgAA..."
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-15T14:30:22+08:00"
+
+    MacHealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+          example: "healthy"
+        checks:
+          type: object
+          properties:
+            zoom_installed:
+              type: boolean
+              example: true
+            ffmpeg_installed:
+              type: boolean
+              example: true
+            blackhole_installed:
+              type: boolean
+              example: true
+            disk_space_gb:
+              type: number
+              format: float
+              description: 可用磁碟空間（GB）
+              example: 125.5
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-15T14:30:22+08:00"
+        version:
+          type: string
+          example: "1.0.0"
+
+    BasicResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success]
+          example: "success"
+        message:
+          type: string
+          example: "操作成功"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-15T14:30:22+08:00"
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          example: "bad_request"
+        message:
+          type: string
+          example: "會議 ID 格式不正確（需為 9-11 位數字）"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-15T14:30:22+08:00"
+        details:
+          type: object
+          additionalProperties: true
+          description: 錯誤詳細資訊（用於除錯）
+
+tags:
+  - name: Zoom Control
+    description: Zoom 會議控制功能
+  - name: Screen Recording
+    description: 螢幕錄製功能
+  - name: Status
+    description: 狀態查詢與截圖
+  - name: Health
+    description: 健康檢查
